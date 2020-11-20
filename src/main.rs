@@ -1,42 +1,87 @@
+#![allow(unused_imports)]
+use log::{warn, info, error};
 use serde::Deserialize;
-use log::{info};
+use anyhow::bail;
 
 use actix_web::http::{header, Method, StatusCode};
 use actix_web::{
-    error, get, guard, middleware, web::{self, Data, Query}, App, Error, HttpRequest, HttpResponse,
-    HttpServer, Result,
+    error, get, guard, middleware,
+    web::{self, Data, Query},
+    App, Error, HttpRequest, HttpResponse, HttpServer, Result,
 };
 #[derive(Deserialize, Debug, Clone)]
 struct Config {
+    auth_server_uri: String,
     client_id: String,
     client_secret: String,
-    callback_uri: String,
+    redirect_uri: String,
     providers: String,
     scope: String,
 }
 
 impl Config {
     fn auth_link(&self) -> anyhow::Result<url::Url> {
-        let base_url = "https://auth.truelayer-sandbox.com/?".to_string();
+        let base_url = format!("{}/?", self.auth_server_uri);
         let mut url = url::Url::parse(&base_url)?;
-        let qp = format!("response_type=code&client_id={id}&redirect_uri={redir}&scope={s}&providers={p}",
-            id=&self.client_id,
-            redir=&self.callback_uri,
-            s=&self.scope,
-            p=&self.providers,
+        let qp = format!(
+            "response_type=code&client_id={id}&redirect_uri={redir}&scope={s}&providers={p}",
+            id = &self.client_id,
+            redir = &self.redirect_uri,
+            s = &self.scope,
+            p = &self.providers,
         );
         url.set_query(Some(&qp));
         Ok(url)
     }
 }
 
+#[derive(Debug, Clone)]
 struct Credentials {
     code: String,
+    cfg: Config,
+    access_token: String,
+    refresh_token: String,
 }
 
+
 impl Credentials {
-    fn from_code(code: String) -> Self {
-        Self { code }
+    async fn exchange_code(code: String, cfg: &Config) -> anyhow::Result<Self> {
+        #[derive(Debug, Deserialize)]
+        struct ExchangeResponse {
+                access_token: String,
+                refresh_token: String,
+        }
+
+        let url = url::Url::parse(&format!("{}/connect/token", &cfg.auth_server_uri))?;
+        let body = serde_json::json!({
+            "grant_type": "authorization_code",
+            "client_id": &cfg.client_id,
+            "client_secret": &cfg.client_secret,
+            "redirect_uri": &cfg.redirect_uri,
+            "code": code
+        });
+        info!("hitting {} with {:?}", url, body);
+
+        let res = reqwest::Client::new()
+            .post(url)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !res.status().is_success() {
+            let status = res.status().to_owned();
+            let text = res.text().await?;
+            error!("Failed to exchange token: {}: {}", status, text);
+            bail!("Failed to exchange token: {}: {}", status, text);
+        }
+        let data: ExchangeResponse = res.json().await?;
+        info!("successful token exchange: {:?}", data);
+        Ok(Self {
+            code: code,
+            cfg: cfg.clone(),
+            access_token: data.access_token,
+            refresh_token: data.refresh_token,
+        })
     }
 }
 
@@ -51,16 +96,18 @@ async fn index(cfg: Data<Config>) -> HttpResponse {
 
 #[derive(Deserialize, Debug)]
 pub struct AuthResponse {
-   code: String,
-   scope: Option<String>,
+    code: String,
+    scope: Option<String>,
 }
 
 #[get("/signin_callback")]
 async fn signin_callback(cfg: Data<Config>, Query(info): Query<AuthResponse>) -> HttpResponse {
     info!("got cb with {:?}", info);
+    let creds = Credentials::exchange_code(info.code, &cfg).await;//.unwrap();
+    info!("got creds: {:?}", creds);
     HttpResponse::build(StatusCode::OK)
-            .content_type("text/html; charset=utf-8")
-            .body(info.code)
+        .content_type("text/html; charset=utf-8")
+        .body("hi")
 }
 
 #[actix_web::main]
@@ -72,7 +119,6 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         App::new()
-            .wrap(middleware::DefaultHeaders::new().header("X-Version", "0.2"))
             .wrap(middleware::Compress::default())
             .wrap(middleware::Logger::default())
             .data(config.clone())

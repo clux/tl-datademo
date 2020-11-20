@@ -36,10 +36,21 @@ impl Config {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct Claims {
+    sub: String,
+    exp: usize,
+}
+impl Claims {
+    fn from_token(t: &str) -> anyhow::Result<jwt::TokenData<Claims>> {
+        let header = jwt::decode_header(&t)?;
+        let msg = jwt::dangerous_insecure_decode_with_validation::<Claims>(&t, &jwt::Validation::new(header.alg))?;
+        Ok(msg)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Credentials {
-    code: String,
-    cfg: Config,
     access_token: String,
     credentials_id: String,
     expiration_date: usize,
@@ -47,6 +58,13 @@ struct Credentials {
 }
 
 impl Credentials {
+    fn new(token: &str, c: Claims) -> Self {
+        Self {
+            access_token: token.into(),
+            credentials_id: c.sub,
+            expiration_date: c.exp,
+        }
+    }
     async fn exchange_code(code: String, cfg: &Config) -> anyhow::Result<Self> {
         #[derive(Debug, Deserialize)]
         struct ExchangeResponse {
@@ -75,24 +93,13 @@ impl Credentials {
         info!("successful token exchange: {:?}", data);
 
         // Decode the jwt
-        let t = &data.access_token;
-        #[derive(Debug, Deserialize)]
-        struct Claims {
-            sub: String,
-            exp: usize,
-        }
-        let header = jwt::decode_header(&t)?;
-        let msg = jwt::dangerous_insecure_decode_with_validation::<Claims>(&t, &jwt::Validation::new(header.alg))?;
+        let msg = Claims::from_token(&data.access_token)?;
         info!("jwt: {:?}", msg);
-        Ok(Self {
-            code: code,
-            cfg: cfg.clone(),
-            access_token: data.access_token,
-            credentials_id: msg.claims.sub,
-            expiration_date: msg.claims.exp,
-        })
+        Ok(Self::new(&data.access_token, msg.claims))
     }
 }
+
+
 
 #[get("/")]
 async fn index(cfg: Data<Config>) -> HttpResponse {
@@ -119,6 +126,36 @@ async fn signin_callback(cfg: Data<Config>, Query(info): Query<AuthResponse>) ->
         .body("hi")
 }
 
+
+use actix_web::{dev, FromRequest};
+use actix_web::error::ErrorUnauthorized;
+use futures::future::{err, ok, Ready};
+impl FromRequest for Credentials {
+    type Error = Error;
+    type Future = Ready<Result<Credentials, Error>>;
+    type Config = ();
+
+    fn from_request(_req: &HttpRequest, _payload: &mut dev::Payload) -> Self::Future {
+        let _auth = _req.headers().get("Authorization");
+        match _auth {
+            Some(_) => {
+                let _split: Vec<&str> = _auth.unwrap().to_str().unwrap().split("Bearer").collect();
+                let token = _split[1].trim();
+                match Claims::from_token(&token) {
+                     Ok(msg) => ok(Credentials::new(&token, msg.claims)),
+                     Err(_e) => err(ErrorUnauthorized("invalid token")),
+                }
+            }
+            None => err(ErrorUnauthorized("blocked!")),
+        }
+    }
+}
+
+#[get("/bah")]
+async fn protected(creds: Credentials) -> HttpResponse {
+    HttpResponse::Ok().finish()
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     std::env::set_var("RUST_LOG", "datademo=info,actix_web=info");
@@ -133,6 +170,7 @@ async fn main() -> std::io::Result<()> {
             .data(config.clone())
             .service(index)
             .service(signin_callback)
+            .service(protected)
     })
     .bind("0.0.0.0:5000")?
     .workers(1)

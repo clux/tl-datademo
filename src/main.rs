@@ -1,7 +1,8 @@
 #![allow(unused_imports)]
-use log::{warn, info, error};
-use serde::Deserialize;
 use anyhow::bail;
+use log::{error, info, warn};
+use serde::Deserialize;
+use jsonwebtoken as jwt;
 
 use actix_web::http::{header, Method, StatusCode};
 use actix_web::{
@@ -40,16 +41,16 @@ struct Credentials {
     code: String,
     cfg: Config,
     access_token: String,
-    refresh_token: String,
+    credentials_id: String,
+    expiration_date: usize,
+    //refresh_token: String,
 }
-
 
 impl Credentials {
     async fn exchange_code(code: String, cfg: &Config) -> anyhow::Result<Self> {
         #[derive(Debug, Deserialize)]
         struct ExchangeResponse {
-                access_token: String,
-                refresh_token: String,
+            access_token: String,
         }
 
         let url = url::Url::parse(&format!("{}/connect/token", &cfg.auth_server_uri))?;
@@ -62,11 +63,7 @@ impl Credentials {
         });
         info!("hitting {} with {:?}", url, body);
 
-        let res = reqwest::Client::new()
-            .post(url)
-            .json(&body)
-            .send()
-            .await?;
+        let res = reqwest::Client::new().post(url).json(&body).send().await?;
 
         if !res.status().is_success() {
             let status = res.status().to_owned();
@@ -76,11 +73,23 @@ impl Credentials {
         }
         let data: ExchangeResponse = res.json().await?;
         info!("successful token exchange: {:?}", data);
+
+        // Decode the jwt
+        let t = &data.access_token;
+        #[derive(Debug, Deserialize)]
+        struct Claims {
+            sub: String,
+            exp: usize,
+        }
+        let header = jwt::decode_header(&t)?;
+        let msg = jwt::dangerous_insecure_decode_with_validation::<Claims>(&t, &jwt::Validation::new(header.alg))?;
+        info!("jwt: {:?}", msg);
         Ok(Self {
             code: code,
             cfg: cfg.clone(),
             access_token: data.access_token,
-            refresh_token: data.refresh_token,
+            credentials_id: msg.claims.sub,
+            expiration_date: msg.claims.exp,
         })
     }
 }
@@ -103,7 +112,7 @@ pub struct AuthResponse {
 #[get("/signin_callback")]
 async fn signin_callback(cfg: Data<Config>, Query(info): Query<AuthResponse>) -> HttpResponse {
     info!("got cb with {:?}", info);
-    let creds = Credentials::exchange_code(info.code, &cfg).await;//.unwrap();
+    let creds = Credentials::exchange_code(info.code, &cfg).await; //.unwrap();
     info!("got creds: {:?}", creds);
     HttpResponse::build(StatusCode::OK)
         .content_type("text/html; charset=utf-8")

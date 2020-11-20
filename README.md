@@ -6,12 +6,14 @@ A quick test.
 Create a `.env` file with the following contents:
 
 ```sh
+export AUTH_SERVER_URI=https://auth.truelayer-sandbox.com
+export DATA_API_URI=https://api.truelayer-sandbox.com/data/v1
 export CLIENT_ID=sandbox-myid-xxxx
 export CLIENT_SECRET=xxxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxxx
-export CALLBACK_URI=https://public_url_of_self/signin_callback
-# data-api specific
-export PROVIDERS="providers=uk-ob-all uk-oauth-all uk-cs-mock"
-export SCOPE="info accounts transactions"
+export REDIRECT_URI=https://public_url_of_self/signin_callback
+export PROVIDERS="uk-ob-all uk-oauth-all uk-cs-mock"
+export SCOPE="info accounts transactions offline_access"
+
 ```
 
 Then source it and start the app:

@@ -506,6 +506,7 @@ dependencies = [
  "envy",
  "log",
  "serde",
+ "url",
 ]
 
 [[package]]

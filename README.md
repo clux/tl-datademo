@@ -16,6 +16,8 @@ export SCOPE="info accounts transactions offline_access"
 
 ```
 
+To get a local redirect uri; use `ngrok http 0.0.0.0:5000` and grab the `https` url with an added `signin_callback`. Then enter this evar into the TL console under App Settings as an allowed redirect uri.
+
 Then source it and start the app:
 
 ```sh

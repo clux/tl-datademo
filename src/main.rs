@@ -13,6 +13,7 @@ use jsonwebtoken as jwt;
 use log::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Mutex;
 use url::Url;
 
 // ----------------------------------------------------------------------------
@@ -172,6 +173,7 @@ async fn get_account_transactions(
         "{}/accounts/{}/transactions",
         &cfg.data_api_uri, acc
     ))?;
+    debug!("GET {}", url);
     let res = reqwest::Client::new()
         .get(url)
         .bearer_auth(&creds.access_token)
@@ -186,9 +188,12 @@ async fn get_account_transactions(
     Ok((acc, data.results))
 }
 
-type TransactionCache = HashMap<String, Vec<Transaction>>;
-async fn get_transactions(cfg: &Config, creds: &Credentials) -> anyhow::Result<TransactionCache> {
+type UserCache = HashMap<String, Vec<Transaction>>; // accounts -> transactions
+type AppCache = HashMap<String, UserCache>; // credential-> usercache
+
+async fn get_transactions(cfg: &Config, creds: &Credentials) -> anyhow::Result<UserCache> {
     let url = Url::parse(&format!("{}/accounts", &cfg.data_api_uri))?;
+    debug!("GET {}", url);
     let res = reqwest::Client::new()
         .get(url)
         .bearer_auth(&creds.access_token)
@@ -200,6 +205,7 @@ async fn get_transactions(cfg: &Config, creds: &Credentials) -> anyhow::Result<T
         bail!("Failed to GET accounts: {}: {}", status, text);
     }
     let accounts: ResultsResponse<Account> = res.json().await?;
+    trace!("Accounts: {:?}", accounts);
 
     // loop over all accounts in parallel and collect transactions
     let mut data = HashMap::new();
@@ -208,12 +214,13 @@ async fn get_transactions(cfg: &Config, creds: &Credentials) -> anyhow::Result<T
         .buffer_unordered(10);
     while let Some(next) = buffered.next().await {
         let t = next?; // TODO: better error handling
+        trace!("Transaction: {:?}", t);
         data.insert(t.0, t.1);
     }
     Ok(data)
 }
 
-fn summarize_transactions(cache: TransactionCache) -> HashMap<String, f64> {
+fn summarize_transactions(cache: &UserCache) -> HashMap<String, f64> {
     // map of category -> spending
     let mut res: HashMap<String, f64> = HashMap::new(); // across all accounts
     for acctrans in cache.values() {
@@ -254,29 +261,50 @@ async fn signin_callback(
 }
 
 #[get("/transactions")]
-async fn transactions(cfg: Data<Config>, creds: Credentials) -> Result<HttpResponse> {
-    // TODO: cache this in memory
+async fn transactions(cfg: Data<Config>, creds: Credentials, cache: Data<Mutex<AppCache>>) -> Result<HttpResponse> {
+    let c = cache.lock().unwrap();
+    if let Some(data) = c.get(&creds.credentials_id) {
+        return Ok(HttpResponse::Ok().json(data))
+    }
+    drop(c);
+
+    // No cache available
     match get_transactions(&cfg, &creds).await {
-        Ok(data) => Ok(HttpResponse::Ok().json(data)),
+        Ok(data) => {
+            debug!("mutating cache");
+            *cache.lock().unwrap().entry(creds.credentials_id).or_default() = data.clone();
+            Ok(HttpResponse::Ok().json(data))
+        },
         Err(e) => Err(ErrorUnauthorized(format!("Accounts error: {}", e))),
     }
 }
 
 #[get("/summary")]
-async fn transaction_summary(cfg: Data<Config>, creds: Credentials) -> Result<HttpResponse> {
-    // TODO: cache this in memory
+async fn transaction_summary(cfg: Data<Config>, creds: Credentials, cache: Data<Mutex<AppCache>>) -> Result<HttpResponse> {
+    let c = cache.lock().unwrap();
+    if let Some(data) = c.get(&creds.credentials_id) {
+        return Ok(HttpResponse::Ok().json(&summarize_transactions(data)))
+    }
+    drop(c);
+
+    // No cache available
     match get_transactions(&cfg, &creds).await {
-        Ok(data) => Ok(HttpResponse::Ok().json(&summarize_transactions(data))),
+        Ok(data) => {
+            debug!("mutating cache");
+            *cache.lock().unwrap().entry(creds.credentials_id).or_default() = data.clone();
+            Ok(HttpResponse::Ok().json(&summarize_transactions(&data)))
+        },
         Err(e) => Err(ErrorUnauthorized(format!("Accounts error: {}", e))),
     }
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    std::env::set_var("RUST_LOG", "datademo=info,actix_web=info");
+    std::env::set_var("RUST_LOG", "datademo=trace,actix_web=info");
     env_logger::init();
     let config = envy::from_env::<Config>().unwrap();
     info!("Configuration: {:?}", config);
+    let data = Data::new(Mutex::new(AppCache::default()));
 
     HttpServer::new(move || {
         App::new()
@@ -285,6 +313,7 @@ async fn main() -> std::io::Result<()> {
             .data(config.clone())
             .service(index)
             .service(signin_callback)
+            .app_data(data.clone())
             .service(transactions)
             .service(transaction_summary)
     })

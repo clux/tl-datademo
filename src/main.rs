@@ -1,6 +1,6 @@
 use actix_web::{
     dev,
-    error::ErrorUnauthorized,
+    error::{self, ErrorUnauthorized},
     get, middleware,
     web::{Data, Query},
     App, Error, FromRequest, HttpRequest, HttpResponse, HttpServer, Result,
@@ -12,8 +12,10 @@ use futures::stream::{self, StreamExt};
 use jsonwebtoken as jwt;
 use log::*;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use tinytemplate::TinyTemplate;
 use url::Url;
 
 // ----------------------------------------------------------------------------
@@ -64,7 +66,7 @@ fn decode_token(t: &str) -> anyhow::Result<jwt::TokenData<Claims>> {
     Ok(msg)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct Credentials {
     access_token: String,
     subject: String,
@@ -250,13 +252,27 @@ async fn index(cfg: Data<Config>) -> HttpResponse {
 async fn signin_callback(
     cfg: Data<Config>,
     Query(info): Query<AuthResponse>,
+    tmpl: Data<TinyTemplate<'_>>,
 ) -> Result<HttpResponse> {
     trace!("Signing cb: {:?}", info);
     match Credentials::exchange_code(info.code, &cfg).await {
-        Ok(c) => Ok(HttpResponse::Ok()
-            .content_type("text/html; charset=utf-8") // TODO: template here!
-            .body(format!("creds: {:?}", c))),
-        Err(e) => Err(ErrorUnauthorized(format!("Token error: {}", e))),
+        Ok(c) => {
+            let ctx = json!({
+                "name": "eirik was here".to_owned(),
+                "data": serde_json::to_string(&c).unwrap()
+            });
+            let out = tmpl
+                .render("user.html", &ctx)
+                .map_err(|_| error::ErrorInternalServerError("Template error"))?;
+            Ok(HttpResponse::Ok().content_type("text/html").body(out))
+        }
+        Err(e) => {
+            warn!("Signing cb error: {}", e);
+            Ok(HttpResponse::Found()
+                .header(actix_web::http::header::LOCATION, "/")
+                .finish()
+                .into_body())
+        }
     }
 }
 
@@ -315,10 +331,13 @@ async fn main() -> std::io::Result<()> {
     let data = Data::new(Mutex::new(AppCache::default()));
 
     HttpServer::new(move || {
+        let mut tt = TinyTemplate::new();
+        tt.add_template("user.html", USER).unwrap();
         App::new()
             .wrap(middleware::Compress::default())
             .wrap(middleware::Logger::default())
             .data(config.clone())
+            .data(tt)
             .service(index)
             .service(signin_callback)
             .app_data(data.clone())
@@ -330,3 +349,4 @@ async fn main() -> std::io::Result<()> {
     .run()
     .await
 }
+static USER: &str = include_str!("../user.html");

@@ -132,44 +132,17 @@ impl FromRequest for Credentials {
         }
     }
 }
-
-// ----------------------------------------------------------------------------
-// AUTH ROUTES
-
-// Index just forces a login
-#[get("/")]
-async fn index(cfg: Data<Config>) -> HttpResponse {
-    let url = cfg.auth_link().expect("invalid config");
-    let r = format!("Plz <a href=\"{}\" target=\"_blank\">bank</a>", url);
-    HttpResponse::Ok()
-        .content_type("text/html; charset=utf-8")
-        .body(r)
-}
-
+// Data passed to callback
 #[derive(Deserialize, Debug)]
 pub struct AuthResponse {
     code: String,
     scope: Option<String>,
 }
-// Callback from TL
-#[get("/signin_callback")]
-async fn signin_callback(
-    cfg: Data<Config>,
-    Query(info): Query<AuthResponse>,
-) -> Result<HttpResponse> {
-    trace!("Signing cb: {:?}", info);
-    match Credentials::exchange_code(info.code, &cfg).await {
-        Ok(c) => Ok(HttpResponse::Ok()
-            .content_type("text/html; charset=utf-8") // TODO: template here!
-            .body(format!("creds: {:?}", c))),
-        Err(e) => Err(ErrorUnauthorized(format!("Token error: {}", e))),
-    }
-}
 
 // ----------------------------------------------------------------------------
 // DATA MANIPULATION
 
-// Data from TrueLayer's API
+// Misc data results from TrueLayer's Data API
 #[derive(Debug, Deserialize)]
 struct ResultsResponse<T> {
     results: Vec<T>,
@@ -252,6 +225,32 @@ fn summarize_transactions(cache: TransactionCache) -> HashMap<String, f64> {
         }
     }
     res
+}
+
+// ----------------------------------------------------------------------------
+// ROUTES
+
+#[get("/")]
+async fn index(cfg: Data<Config>) -> HttpResponse {
+    let url = cfg.auth_link().expect("invalid config");
+    let r = format!("Plz <a href=\"{}\" target=\"_blank\">bank</a>", url);
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(r)
+}
+
+#[get("/signin_callback")]
+async fn signin_callback(
+    cfg: Data<Config>,
+    Query(info): Query<AuthResponse>,
+) -> Result<HttpResponse> {
+    trace!("Signing cb: {:?}", info);
+    match Credentials::exchange_code(info.code, &cfg).await {
+        Ok(c) => Ok(HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8") // TODO: template here!
+            .body(format!("creds: {:?}", c))),
+        Err(e) => Err(ErrorUnauthorized(format!("Token error: {}", e))),
+    }
 }
 
 #[get("/transactions")]

@@ -67,7 +67,7 @@ fn decode_token(t: &str) -> anyhow::Result<jwt::TokenData<Claims>> {
 #[derive(Debug, Clone)]
 struct Credentials {
     access_token: String,
-    credentials_id: String,
+    subject: String,
     expiration_date: usize,
     // TODO: refresh_token logic
 }
@@ -76,7 +76,7 @@ impl Credentials {
     fn new(token: &str, c: Claims) -> Self {
         Self {
             access_token: token.into(),
-            credentials_id: c.sub,
+            subject: c.sub,
             expiration_date: c.exp,
         }
     }
@@ -189,7 +189,7 @@ async fn get_account_transactions(
 }
 
 type UserCache = HashMap<String, Vec<Transaction>>; // accounts -> transactions
-type AppCache = HashMap<String, UserCache>; // credential-> usercache
+type AppCache = HashMap<String, UserCache>; // subject -> usercache
 
 async fn get_transactions(cfg: &Config, creds: &Credentials) -> anyhow::Result<UserCache> {
     let url = Url::parse(&format!("{}/accounts", &cfg.data_api_uri))?;
@@ -261,10 +261,14 @@ async fn signin_callback(
 }
 
 #[get("/transactions")]
-async fn transactions(cfg: Data<Config>, creds: Credentials, cache: Data<Mutex<AppCache>>) -> Result<HttpResponse> {
+async fn transactions(
+    cfg: Data<Config>,
+    creds: Credentials,
+    cache: Data<Mutex<AppCache>>,
+) -> Result<HttpResponse> {
     let c = cache.lock().unwrap();
-    if let Some(data) = c.get(&creds.credentials_id) {
-        return Ok(HttpResponse::Ok().json(data))
+    if let Some(data) = c.get(&creds.subject) {
+        return Ok(HttpResponse::Ok().json(data));
     }
     drop(c);
 
@@ -272,18 +276,22 @@ async fn transactions(cfg: Data<Config>, creds: Credentials, cache: Data<Mutex<A
     match get_transactions(&cfg, &creds).await {
         Ok(data) => {
             debug!("mutating cache");
-            *cache.lock().unwrap().entry(creds.credentials_id).or_default() = data.clone();
+            *cache.lock().unwrap().entry(creds.subject).or_default() = data.clone();
             Ok(HttpResponse::Ok().json(data))
-        },
+        }
         Err(e) => Err(ErrorUnauthorized(format!("Accounts error: {}", e))),
     }
 }
 
 #[get("/summary")]
-async fn transaction_summary(cfg: Data<Config>, creds: Credentials, cache: Data<Mutex<AppCache>>) -> Result<HttpResponse> {
+async fn transaction_summary(
+    cfg: Data<Config>,
+    creds: Credentials,
+    cache: Data<Mutex<AppCache>>,
+) -> Result<HttpResponse> {
     let c = cache.lock().unwrap();
-    if let Some(data) = c.get(&creds.credentials_id) {
-        return Ok(HttpResponse::Ok().json(&summarize_transactions(data)))
+    if let Some(data) = c.get(&creds.subject) {
+        return Ok(HttpResponse::Ok().json(&summarize_transactions(data)));
     }
     drop(c);
 
@@ -291,9 +299,9 @@ async fn transaction_summary(cfg: Data<Config>, creds: Credentials, cache: Data<
     match get_transactions(&cfg, &creds).await {
         Ok(data) => {
             debug!("mutating cache");
-            *cache.lock().unwrap().entry(creds.credentials_id).or_default() = data.clone();
+            *cache.lock().unwrap().entry(creds.subject).or_default() = data.clone();
             Ok(HttpResponse::Ok().json(&summarize_transactions(&data)))
-        },
+        }
         Err(e) => Err(ErrorUnauthorized(format!("Accounts error: {}", e))),
     }
 }

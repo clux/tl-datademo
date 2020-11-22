@@ -2,8 +2,10 @@
 use anyhow::bail;
 use jsonwebtoken as jwt;
 use log::{error, info, warn};
-use serde::Deserialize;
-
+use serde::{Serialize, Deserialize};
+use futures::stream::{self, StreamExt};
+use url::Url;
+use std::collections::HashMap;
 use actix_web::http::{header, Method, StatusCode};
 use actix_web::{
     error, get, guard, middleware,
@@ -24,7 +26,7 @@ struct Config {
 impl Config {
     fn auth_link(&self) -> anyhow::Result<url::Url> {
         let base_url = format!("{}/?", self.auth_server_uri);
-        let mut url = url::Url::parse(&base_url)?;
+        let mut url = Url::parse(&base_url)?;
         let qp = format!(
             "response_type=code&client_id={id}&redirect_uri={redir}&scope={s}&providers={p}",
             id = &self.client_id,
@@ -73,7 +75,7 @@ impl Credentials {
             access_token: String,
         }
 
-        let url = url::Url::parse(&format!("{}/connect/token", &cfg.auth_server_uri))?;
+        let url = Url::parse(&format!("{}/connect/token", &cfg.auth_server_uri))?;
         let body = serde_json::json!({
             "grant_type": "authorization_code",
             "client_id": &cfg.client_id,
@@ -154,20 +156,25 @@ impl FromRequest for Credentials {
 }
 
 #[derive(Debug, Deserialize)]
-struct AccountsResponse {
-    results: Vec<AccountResponse>,
+struct ResultsResponse<T> {
+    results: Vec<T>,
 }
-#[derive(Debug, Deserialize)]
-struct AccountResponse {
+#[derive(Debug, Deserialize, Serialize)]
+struct Account {
     account_id: String,
     account_type: String,
     display_name: String,
     currency: String,
 }
-async fn get_accounts(cfg: &Config, creds: &Credentials) -> anyhow::Result<AccountsResponse> {
-    let url = url::Url::parse(&format!("{}/accounts", &cfg.data_api_uri))?;
-    info!("hitting {}", url);
+#[derive(Debug, Deserialize, Serialize)]
+struct Transaction {
+    transaction_id: String,
+    amount: f64,
+    description: String,
+}
 
+async fn get_account_transactions(acc: String, cfg: &Config, creds: &Credentials) -> anyhow::Result<(String, Vec<Transaction>)> {
+    let url = Url::parse(&format!("{}/accounts/{}/transactions", &cfg.data_api_uri, acc))?;
     let res = reqwest::Client::new()
         .get(url)
         .bearer_auth(&creds.access_token)
@@ -176,10 +183,35 @@ async fn get_accounts(cfg: &Config, creds: &Credentials) -> anyhow::Result<Accou
     if !res.status().is_success() {
         let status = res.status().to_owned();
         let text = res.text().await?;
-        bail!("Failed to GET /accounts: {}: {}", status, text);
+        bail!("Failed to GET transactions: {}: {}", status, text);
     }
-    let data: AccountsResponse = res.json().await?;
-    info!("Got: {:?}", data);
+    let data: ResultsResponse<Transaction> = res.json().await?;
+    Ok((acc, data.results))
+}
+
+async fn get_transactions(cfg: &Config, creds: &Credentials) -> anyhow::Result<HashMap<String, Vec<Transaction>>> {
+    let url = Url::parse(&format!("{}/accounts", &cfg.data_api_uri))?;
+    let res = reqwest::Client::new()
+        .get(url)
+        .bearer_auth(&creds.access_token)
+        .send()
+        .await?;
+    if !res.status().is_success() {
+        let status = res.status().to_owned();
+        let text = res.text().await?;
+        bail!("Failed to GET accounts: {}: {}", status, text);
+    }
+    let accounts: ResultsResponse<Account> = res.json().await?;
+
+    // loop over all accounts in parallel and collect
+    let mut data = HashMap::new();
+    let mut buffered = stream::iter(accounts.results)
+        .map(move |acc| get_account_transactions(acc.account_id, cfg, creds))
+        .buffer_unordered(10);
+    while let Some(next) = buffered.next().await {
+        let t = next?; // TODO: better error handling
+        data.insert(t.0, t.1);
+    }
     Ok(data)
 }
 
@@ -187,10 +219,13 @@ async fn get_accounts(cfg: &Config, creds: &Credentials) -> anyhow::Result<Accou
 async fn transactions(cfg: Data<Config>, creds: Credentials) -> Result<HttpResponse> {
     // TODO: use data api to gets all transactions for a user's connected bank accounts
     // cache this in memory
-    match get_accounts(&cfg, &creds).await {
-        Ok(accs) => Ok(HttpResponse::build(StatusCode::OK)
-            .content_type("text/html; charset=utf-8")
-            .body(format!("transactions: {:?}", accs))),
+    match get_transactions(&cfg, &creds).await {
+        Ok(data) => {
+            let res = serde_json::to_string_pretty(&data).unwrap();
+            Ok(HttpResponse::build(StatusCode::OK)
+                .content_type("text/html; charset=utf-8")
+                .body(res))
+        }
         Err(e) => Err(ErrorUnauthorized(format!("Accounts error: {}", e))),
     }
 }

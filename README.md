@@ -1,12 +1,12 @@
-# TrueLayer datademo
-A quick test.
+# TrueLayer Data API Demo
+A small app testing TrueLayer's [Data API](https://docs.truelayer.com/#data-api-v1) after doing the [End User Authentication](https://docs.truelayer.com/#end-user-authentication) dance.
 
 ## Setup
 ### Expose
 Create a publicly accessible redirect url. E.g. https output from `ngrok http 0.0.0.0:5000` will do.
 
 ### TrueLayer
-Make an app for the Data API, generate a client id + secret, point the redirect url to the one exposed above.
+Make an app for the Data API on the [TL console](https://console.truelayer.com/settings/), generate a client id + secret, point the redirect url to the one exposed above.
 
 ## Usage
 Create a `.env` file with the following from above:

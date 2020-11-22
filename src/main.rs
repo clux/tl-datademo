@@ -1,8 +1,8 @@
 #![allow(unused_imports)]
 use anyhow::bail;
+use jsonwebtoken as jwt;
 use log::{error, info, warn};
 use serde::Deserialize;
-use jsonwebtoken as jwt;
 
 use actix_web::http::{header, Method, StatusCode};
 use actix_web::{
@@ -13,6 +13,7 @@ use actix_web::{
 #[derive(Deserialize, Debug, Clone)]
 struct Config {
     auth_server_uri: String,
+    data_api_uri: String,
     client_id: String,
     client_secret: String,
     redirect_uri: String,
@@ -41,12 +42,13 @@ struct Claims {
     sub: String,
     exp: usize,
 }
-impl Claims {
-    fn from_token(t: &str) -> anyhow::Result<jwt::TokenData<Claims>> {
-        let header = jwt::decode_header(&t)?;
-        let msg = jwt::dangerous_insecure_decode_with_validation::<Claims>(&t, &jwt::Validation::new(header.alg))?;
-        Ok(msg)
-    }
+fn decode_token(t: &str) -> anyhow::Result<jwt::TokenData<Claims>> {
+    let header = jwt::decode_header(&t)?;
+    let msg = jwt::dangerous_insecure_decode_with_validation::<Claims>(
+        &t,
+        &jwt::Validation::new(header.alg),
+    )?;
+    Ok(msg)
 }
 
 #[derive(Debug, Clone)]
@@ -86,20 +88,17 @@ impl Credentials {
         if !res.status().is_success() {
             let status = res.status().to_owned();
             let text = res.text().await?;
-            error!("Failed to exchange token: {}: {}", status, text);
             bail!("Failed to exchange token: {}: {}", status, text);
         }
         let data: ExchangeResponse = res.json().await?;
         info!("successful token exchange: {:?}", data);
 
         // Decode the jwt
-        let msg = Claims::from_token(&data.access_token)?;
+        let msg = decode_token(&data.access_token)?;
         info!("jwt: {:?}", msg);
         Ok(Self::new(&data.access_token, msg.claims))
     }
 }
-
-
 
 #[get("/")]
 async fn index(cfg: Data<Config>) -> HttpResponse {
@@ -117,18 +116,21 @@ pub struct AuthResponse {
 }
 
 #[get("/signin_callback")]
-async fn signin_callback(cfg: Data<Config>, Query(info): Query<AuthResponse>) -> HttpResponse {
+async fn signin_callback(
+    cfg: Data<Config>,
+    Query(info): Query<AuthResponse>,
+) -> Result<HttpResponse> {
     info!("got cb with {:?}", info);
-    let creds = Credentials::exchange_code(info.code, &cfg).await; //.unwrap();
-    info!("got creds: {:?}", creds);
-    HttpResponse::build(StatusCode::OK)
-        .content_type("text/html; charset=utf-8")
-        .body("hi")
+    match Credentials::exchange_code(info.code, &cfg).await {
+        Ok(c) => Ok(HttpResponse::build(StatusCode::OK)
+            .content_type("text/html; charset=utf-8")
+            .body(format!("creds: {:?}", c))),
+        Err(e) => Err(ErrorUnauthorized(format!("Token error: {}", e))),
+    }
 }
 
-
-use actix_web::{dev, FromRequest};
 use actix_web::error::ErrorUnauthorized;
+use actix_web::{dev, FromRequest};
 use futures::future::{err, ok, Ready};
 impl FromRequest for Credentials {
     type Error = Error;
@@ -141,9 +143,9 @@ impl FromRequest for Credentials {
             Some(_) => {
                 let _split: Vec<&str> = _auth.unwrap().to_str().unwrap().split("Bearer").collect();
                 let token = _split[1].trim();
-                match Claims::from_token(&token) {
-                     Ok(msg) => ok(Credentials::new(&token, msg.claims)),
-                     Err(_e) => err(ErrorUnauthorized("invalid token")),
+                match decode_token(&token) {
+                    Ok(msg) => ok(Credentials::new(&token, msg.claims)),
+                    Err(_e) => err(ErrorUnauthorized("invalid token")),
                 }
             }
             None => err(ErrorUnauthorized("blocked!")),
@@ -151,8 +153,53 @@ impl FromRequest for Credentials {
     }
 }
 
-#[get("/bah")]
-async fn protected(creds: Credentials) -> HttpResponse {
+#[derive(Debug, Deserialize)]
+struct AccountsResponse {
+    results: Vec<AccountResponse>,
+}
+#[derive(Debug, Deserialize)]
+struct AccountResponse {
+    account_id: String,
+    account_type: String,
+    display_name: String,
+    currency: String,
+}
+async fn get_accounts(cfg: &Config, creds: &Credentials) -> anyhow::Result<AccountsResponse> {
+    let url = url::Url::parse(&format!("{}/accounts", &cfg.data_api_uri))?;
+    info!("hitting {}", url);
+
+    let res = reqwest::Client::new()
+        .get(url)
+        .bearer_auth(&creds.access_token)
+        .send()
+        .await?;
+    if !res.status().is_success() {
+        let status = res.status().to_owned();
+        let text = res.text().await?;
+        bail!("Failed to GET /accounts: {}: {}", status, text);
+    }
+    let data: AccountsResponse = res.json().await?;
+    info!("Got: {:?}", data);
+    Ok(data)
+}
+
+#[get("/transactions")]
+async fn transactions(cfg: Data<Config>, creds: Credentials) -> Result<HttpResponse> {
+    // TODO: use data api to gets all transactions for a user's connected bank accounts
+    // cache this in memory
+    match get_accounts(&cfg, &creds).await {
+        Ok(accs) => Ok(HttpResponse::build(StatusCode::OK)
+            .content_type("text/html; charset=utf-8")
+            .body(format!("transactions: {:?}", accs))),
+        Err(e) => Err(ErrorUnauthorized(format!("Accounts error: {}", e))),
+    }
+}
+
+#[get("/summary")]
+async fn transaction_summary(creds: Credentials) -> HttpResponse {
+    // TODO: use data api to get a summary of all their connected bank accounts
+    // for each category of transaction, the total amount user has spent in the past week
+    // cache the transaction locally
     HttpResponse::Ok().finish()
 }
 
@@ -170,7 +217,7 @@ async fn main() -> std::io::Result<()> {
             .data(config.clone())
             .service(index)
             .service(signin_callback)
-            .service(protected)
+            .service(transactions)
     })
     .bind("0.0.0.0:5000")?
     .workers(1)

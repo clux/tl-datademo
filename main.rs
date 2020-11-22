@@ -268,7 +268,7 @@ async fn signin_callback(
             let out = tmpl
                 .render("user.html", &ctx)
                 .map_err(|_| error::ErrorInternalServerError("Template error"))?;
-            // TODO: ought to redirect here - so we aren't stuck on this ugly query string page
+            // TODO: ought to write token to localStorage here
             Ok(HttpResponse::Ok().content_type("text/html").body(out))
         }
         Err(e) => {
@@ -329,6 +329,7 @@ async fn transaction_summary(
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    std::env::set_var("RUST_LOG", "datademo=debug,actix_web=info");
     env_logger::init();
     let config = envy::from_env::<Config>().unwrap();
     info!("Configuration: {:?}", config);

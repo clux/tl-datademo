@@ -1,17 +1,18 @@
 #![allow(unused_imports)]
-use anyhow::bail;
-use jsonwebtoken as jwt;
-use log::{error, info, warn};
-use serde::{Serialize, Deserialize};
-use futures::stream::{self, StreamExt};
-use url::Url;
-use std::collections::HashMap;
 use actix_web::http::{header, Method, StatusCode};
 use actix_web::{
     error, get, guard, middleware,
     web::{self, Data, Query},
     App, Error, HttpRequest, HttpResponse, HttpServer, Result,
 };
+use anyhow::bail;
+use chrono::{DateTime, Duration, Utc};
+use futures::stream::{self, StreamExt};
+use jsonwebtoken as jwt;
+use log::{error, info, warn};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use url::Url;
 #[derive(Deserialize, Debug, Clone)]
 struct Config {
     auth_server_uri: String,
@@ -106,7 +107,7 @@ impl Credentials {
 async fn index(cfg: Data<Config>) -> HttpResponse {
     let url = cfg.auth_link().expect("invalid config");
     let r = format!("Plz <a href=\"{}\" target=\"_blank\">bank</a>", url);
-    HttpResponse::build(StatusCode::OK)
+    HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
         .body(r)
 }
@@ -124,8 +125,8 @@ async fn signin_callback(
 ) -> Result<HttpResponse> {
     info!("got cb with {:?}", info);
     match Credentials::exchange_code(info.code, &cfg).await {
-        Ok(c) => Ok(HttpResponse::build(StatusCode::OK)
-            .content_type("text/html; charset=utf-8")
+        Ok(c) => Ok(HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8") // TODO: template here!
             .body(format!("creds: {:?}", c))),
         Err(e) => Err(ErrorUnauthorized(format!("Token error: {}", e))),
     }
@@ -166,15 +167,24 @@ struct Account {
     display_name: String,
     currency: String,
 }
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct Transaction {
     transaction_id: String,
     amount: f64,
+    timestamp: DateTime<Utc>,
     description: String,
+    transaction_category: String,
 }
 
-async fn get_account_transactions(acc: String, cfg: &Config, creds: &Credentials) -> anyhow::Result<(String, Vec<Transaction>)> {
-    let url = Url::parse(&format!("{}/accounts/{}/transactions", &cfg.data_api_uri, acc))?;
+async fn get_account_transactions(
+    acc: String,
+    cfg: &Config,
+    creds: &Credentials,
+) -> anyhow::Result<(String, Vec<Transaction>)> {
+    let url = Url::parse(&format!(
+        "{}/accounts/{}/transactions",
+        &cfg.data_api_uri, acc
+    ))?;
     let res = reqwest::Client::new()
         .get(url)
         .bearer_auth(&creds.access_token)
@@ -189,7 +199,8 @@ async fn get_account_transactions(acc: String, cfg: &Config, creds: &Credentials
     Ok((acc, data.results))
 }
 
-async fn get_transactions(cfg: &Config, creds: &Credentials) -> anyhow::Result<HashMap<String, Vec<Transaction>>> {
+type TransactionCache = HashMap<String, Vec<Transaction>>;
+async fn get_transactions(cfg: &Config, creds: &Credentials) -> anyhow::Result<TransactionCache> {
     let url = Url::parse(&format!("{}/accounts", &cfg.data_api_uri))?;
     let res = reqwest::Client::new()
         .get(url)
@@ -203,7 +214,7 @@ async fn get_transactions(cfg: &Config, creds: &Credentials) -> anyhow::Result<H
     }
     let accounts: ResultsResponse<Account> = res.json().await?;
 
-    // loop over all accounts in parallel and collect
+    // loop over all accounts in parallel and collect transactions
     let mut data = HashMap::new();
     let mut buffered = stream::iter(accounts.results)
         .map(move |acc| get_account_transactions(acc.account_id, cfg, creds))
@@ -215,27 +226,36 @@ async fn get_transactions(cfg: &Config, creds: &Credentials) -> anyhow::Result<H
     Ok(data)
 }
 
+fn summarize_transactions(cache: TransactionCache) -> HashMap<String, f64> {
+    // map of category -> spending
+    let mut res: HashMap<String, f64> = HashMap::new(); // across all accounts
+    for acctrans in cache.values() {
+        for t in acctrans {
+            let diff: Duration = Utc::now() - t.timestamp;
+            if diff.num_days() < 7 {
+                *res.entry(t.transaction_category.clone()).or_default() += t.amount;
+            }
+        }
+    }
+    res
+}
+
 #[get("/transactions")]
 async fn transactions(cfg: Data<Config>, creds: Credentials) -> Result<HttpResponse> {
-    // TODO: use data api to gets all transactions for a user's connected bank accounts
-    // cache this in memory
+    // TODO: cache this in memory
     match get_transactions(&cfg, &creds).await {
-        Ok(data) => {
-            let res = serde_json::to_string_pretty(&data).unwrap();
-            Ok(HttpResponse::build(StatusCode::OK)
-                .content_type("text/html; charset=utf-8")
-                .body(res))
-        }
+        Ok(data) => Ok(HttpResponse::Ok().json(data)),
         Err(e) => Err(ErrorUnauthorized(format!("Accounts error: {}", e))),
     }
 }
 
 #[get("/summary")]
-async fn transaction_summary(creds: Credentials) -> HttpResponse {
-    // TODO: use data api to get a summary of all their connected bank accounts
-    // for each category of transaction, the total amount user has spent in the past week
-    // cache the transaction locally
-    HttpResponse::Ok().finish()
+async fn transaction_summary(cfg: Data<Config>, creds: Credentials) -> Result<HttpResponse> {
+    // TODO: cache this in memory
+    match get_transactions(&cfg, &creds).await {
+        Ok(data) => Ok(HttpResponse::Ok().json(&summarize_transactions(data))),
+        Err(e) => Err(ErrorUnauthorized(format!("Accounts error: {}", e))),
+    }
 }
 
 #[actix_web::main]
@@ -253,6 +273,7 @@ async fn main() -> std::io::Result<()> {
             .service(index)
             .service(signin_callback)
             .service(transactions)
+            .service(transaction_summary)
     })
     .bind("0.0.0.0:5000")?
     .workers(1)

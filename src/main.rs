@@ -258,7 +258,8 @@ async fn signin_callback(
     match Credentials::exchange_code(info.code, &cfg).await {
         Ok(c) => {
             let ctx = json!({
-                "name": "eirik was here".to_owned(),
+                "title": "eirik was here".to_owned(),
+                "jwt": c.access_token,
                 "data": serde_json::to_string(&c).unwrap()
             });
             let out = tmpl

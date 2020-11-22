@@ -5,7 +5,33 @@
   <title>Eirik Bank App</title>
 </head>
 <body>
-  <h1>{ Title }</h1>
-  <small>Debug Info: { data }</small>
+  <h1>{ title }</h1>
+  <small style="display:none">Debug Info: { data }</small>
+  <br/>
+  <button id="transactions">Transaction Dump</button>
+  <button id="summary">Summarize My Week</button>
+  <p id="output">Magical Output Box</p>
 </body>
+<script>
+async function boot() \{
+    let output = document.getElementById('output');
+    let headers = new Headers();
+    headers.append("Authorization", "Bearer " + "{ jwt }")
+    document.getElementById('transactions').onclick = async function changeContent() \{
+        output.innerHTML = "transactions";
+        output.style = "color: blue";
+        let resp = await fetch("/transactions", \{ headers: headers });
+        let body = await resp.text();
+        output.innerHTML = body;
+    }
+    document.getElementById('summary').onclick = async function changeContent() \{
+        output.innerHTML = "summary";
+        output.style = "color: green";
+        let resp = await fetch("/summary", \{ headers: headers });
+        let body = await resp.text();
+        output.innerHTML = body;
+    }
+}
+boot()
+</script>
 </html>

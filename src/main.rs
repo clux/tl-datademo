@@ -270,7 +270,7 @@ async fn transactions(
     if let Some(data) = c.get(&creds.subject) {
         return Ok(HttpResponse::Ok().json(data));
     }
-    drop(c);
+    drop(c); // don't lock cache while doing slow requests
 
     // No cache available
     match get_transactions(&cfg, &creds).await {
@@ -293,7 +293,7 @@ async fn transaction_summary(
     if let Some(data) = c.get(&creds.subject) {
         return Ok(HttpResponse::Ok().json(&summarize_transactions(data)));
     }
-    drop(c);
+    drop(c); // don't lock cache while doing slow requests
 
     // No cache available
     match get_transactions(&cfg, &creds).await {

@@ -1,18 +1,24 @@
-#![allow(unused_imports)]
-use actix_web::http::{header, Method, StatusCode};
 use actix_web::{
-    error, get, guard, middleware,
-    web::{self, Data, Query},
-    App, Error, HttpRequest, HttpResponse, HttpServer, Result,
+    dev,
+    error::ErrorUnauthorized,
+    get, middleware,
+    web::{Data, Query},
+    App, Error, FromRequest, HttpRequest, HttpResponse, HttpServer, Result,
 };
 use anyhow::bail;
 use chrono::{DateTime, Duration, Utc};
+use futures::future::{err, ok, Ready};
 use futures::stream::{self, StreamExt};
 use jsonwebtoken as jwt;
-use log::{error, info, warn};
+use log::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use url::Url;
+
+// ----------------------------------------------------------------------------
+// CONFIG
+
+/// Application config loaded via SCREAMING_SNAKE_CASE evars via envy crate
 #[derive(Deserialize, Debug, Clone)]
 struct Config {
     auth_server_uri: String,
@@ -40,6 +46,9 @@ impl Config {
     }
 }
 
+// ----------------------------------------------------------------------------
+// AUTH
+
 #[derive(Debug, Deserialize)]
 struct Claims {
     sub: String,
@@ -59,7 +68,7 @@ struct Credentials {
     access_token: String,
     credentials_id: String,
     expiration_date: usize,
-    //refresh_token: String,
+    // TODO: refresh_token logic
 }
 
 impl Credentials {
@@ -84,7 +93,7 @@ impl Credentials {
             "redirect_uri": &cfg.redirect_uri,
             "code": code
         });
-        info!("hitting {} with {:?}", url, body);
+        trace!("hitting {} with {:?}", url, body);
 
         let res = reqwest::Client::new().post(url).json(&body).send().await?;
 
@@ -94,47 +103,15 @@ impl Credentials {
             bail!("Failed to exchange token: {}: {}", status, text);
         }
         let data: ExchangeResponse = res.json().await?;
-        info!("successful token exchange: {:?}", data);
+        trace!("successful token exchange: {:?}", data);
 
-        // Decode the jwt
         let msg = decode_token(&data.access_token)?;
-        info!("jwt: {:?}", msg);
+        trace!("jwt: {:?}", msg);
         Ok(Self::new(&data.access_token, msg.claims))
     }
 }
 
-#[get("/")]
-async fn index(cfg: Data<Config>) -> HttpResponse {
-    let url = cfg.auth_link().expect("invalid config");
-    let r = format!("Plz <a href=\"{}\" target=\"_blank\">bank</a>", url);
-    HttpResponse::Ok()
-        .content_type("text/html; charset=utf-8")
-        .body(r)
-}
-
-#[derive(Deserialize, Debug)]
-pub struct AuthResponse {
-    code: String,
-    scope: Option<String>,
-}
-
-#[get("/signin_callback")]
-async fn signin_callback(
-    cfg: Data<Config>,
-    Query(info): Query<AuthResponse>,
-) -> Result<HttpResponse> {
-    info!("got cb with {:?}", info);
-    match Credentials::exchange_code(info.code, &cfg).await {
-        Ok(c) => Ok(HttpResponse::Ok()
-            .content_type("text/html; charset=utf-8") // TODO: template here!
-            .body(format!("creds: {:?}", c))),
-        Err(e) => Err(ErrorUnauthorized(format!("Token error: {}", e))),
-    }
-}
-
-use actix_web::error::ErrorUnauthorized;
-use actix_web::{dev, FromRequest};
-use futures::future::{err, ok, Ready};
+// Bearer token middleware for auth-required routes
 impl FromRequest for Credentials {
     type Error = Error;
     type Future = Ready<Result<Credentials, Error>>;
@@ -156,6 +133,43 @@ impl FromRequest for Credentials {
     }
 }
 
+// ----------------------------------------------------------------------------
+// AUTH ROUTES
+
+// Index just forces a login
+#[get("/")]
+async fn index(cfg: Data<Config>) -> HttpResponse {
+    let url = cfg.auth_link().expect("invalid config");
+    let r = format!("Plz <a href=\"{}\" target=\"_blank\">bank</a>", url);
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(r)
+}
+
+#[derive(Deserialize, Debug)]
+pub struct AuthResponse {
+    code: String,
+    scope: Option<String>,
+}
+// Callback from TL
+#[get("/signin_callback")]
+async fn signin_callback(
+    cfg: Data<Config>,
+    Query(info): Query<AuthResponse>,
+) -> Result<HttpResponse> {
+    trace!("Signing cb: {:?}", info);
+    match Credentials::exchange_code(info.code, &cfg).await {
+        Ok(c) => Ok(HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8") // TODO: template here!
+            .body(format!("creds: {:?}", c))),
+        Err(e) => Err(ErrorUnauthorized(format!("Token error: {}", e))),
+    }
+}
+
+// ----------------------------------------------------------------------------
+// DATA MANIPULATION
+
+// Data from TrueLayer's API
 #[derive(Debug, Deserialize)]
 struct ResultsResponse<T> {
     results: Vec<T>,

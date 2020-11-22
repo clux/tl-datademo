@@ -10,9 +10,10 @@
   <br/>
   <button id="transactions">Transaction Dump</button>
   <button id="summary">Summarize My Week</button>
-  <p id="output">Magical Output Box</p>
+  <div id="output">Output Div</div>
 </body>
 <script>
+// This brace escaping is annoying. Would not recommend tinytemplate.
 async function boot() \{
     let output = document.getElementById('output');
     let headers = new Headers();

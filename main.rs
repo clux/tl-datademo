@@ -244,6 +244,7 @@ fn summarize_transactions(cache: &UserCache) -> HashMap<String, f64> {
 async fn index(cfg: Data<Config>) -> HttpResponse {
     let url = cfg.auth_link().expect("invalid config");
     let r = format!("Plz <a href=\"{}\" target=\"_blank\">bank</a>", url);
+    // TODO: could have the template check localStorage for a token rather than forcing a login
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
         .body(r)
@@ -351,4 +352,4 @@ async fn main() -> std::io::Result<()> {
     .run()
     .await
 }
-static USER: &str = include_str!("../user.html");
+static USER: &str = include_str!("./user.html");

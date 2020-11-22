@@ -4,6 +4,10 @@ version = "0.1.0"
 authors = ["clux"]
 edition = "2018"
 
+[[bin]]
+name = "datademo"
+path = "main.rs"
+
 [dependencies]
 envy = "0.4"
 serde = { version = "1", features = ["derive"] }

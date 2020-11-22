@@ -229,6 +229,7 @@ fn summarize_transactions(cache: &UserCache) -> HashMap<String, f64> {
         for t in acctrans {
             let diff: Duration = Utc::now() - t.timestamp;
             if diff.num_days() < 7 {
+                // Super simplified, ignores pending statuses, assumes a single currency across all accounts
                 *res.entry(t.transaction_category.clone()).or_default() += t.amount;
             }
         }

@@ -1,8 +1,8 @@
 use actix_web::{
     dev,
     error::{self, ErrorUnauthorized},
-    get, middleware,
-    web::{Data, Query},
+    get, post, middleware,
+    web::{Data, Form},
     App, Error, FromRequest, HttpRequest, HttpResponse, HttpServer, Result,
 };
 use anyhow::bail;
@@ -38,7 +38,7 @@ impl Config {
         let base_url = format!("{}/?", self.auth_server_uri);
         let mut url = Url::parse(&base_url)?;
         let qp = format!(
-            "response_type=code&client_id={id}&redirect_uri={redir}&scope={s}&providers={p}",
+            "response_type=code&client_id={id}&redirect_uri={redir}&scope={s}&providers={p}&response_mode=form_post",
             id = &self.client_id,
             redir = &self.redirect_uri,
             s = &self.scope,
@@ -69,7 +69,7 @@ fn decode_token(t: &str) -> anyhow::Result<jwt::TokenData<Claims>> {
 #[derive(Debug, Clone, Serialize)]
 struct Credentials {
     access_token: String,
-    subject: String,
+    subject: String, // this is pretty anonymised :/
     expiration_date: usize,
     // TODO: refresh_token logic
 }
@@ -250,23 +250,25 @@ async fn index(cfg: Data<Config>) -> HttpResponse {
         .body(r)
 }
 
-#[get("/signin_callback")]
+#[post("/login")]
 async fn signin_callback(
     cfg: Data<Config>,
-    Query(info): Query<AuthResponse>,
+    Form(info): Form<AuthResponse>,
     tmpl: Data<TinyTemplate<'_>>,
 ) -> Result<HttpResponse> {
     trace!("Signing cb: {:?}", info);
     match Credentials::exchange_code(info.code, &cfg).await {
         Ok(c) => {
             let ctx = json!({
-                "title": "eirik was here".to_owned(),
+                "title": "logged in".to_owned(),
+                "subject": c.subject,
                 "jwt": c.access_token,
                 "data": serde_json::to_string(&c).unwrap()
             });
             let out = tmpl
                 .render("user.html", &ctx)
                 .map_err(|_| error::ErrorInternalServerError("Template error"))?;
+            // TODO: ought to redirect here - so we aren't stuck on this ugly query string page
             Ok(HttpResponse::Ok().content_type("text/html").body(out))
         }
         Err(e) => {
@@ -327,7 +329,6 @@ async fn transaction_summary(
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    std::env::set_var("RUST_LOG", "datademo=trace,actix_web=info");
     env_logger::init();
     let config = envy::from_env::<Config>().unwrap();
     info!("Configuration: {:?}", config);

@@ -1,7 +1,7 @@
 use actix_web::{
     dev,
     error::{self, ErrorUnauthorized},
-    get, post, middleware,
+    get, middleware, post,
     web::{Data, Form},
     App, Error, FromRequest, HttpRequest, HttpResponse, HttpServer, Result,
 };
@@ -120,18 +120,15 @@ impl FromRequest for Credentials {
     type Future = Ready<Result<Credentials, Error>>;
     type Config = ();
 
-    fn from_request(_req: &HttpRequest, _payload: &mut dev::Payload) -> Self::Future {
-        let _auth = _req.headers().get("Authorization");
-        match _auth {
-            Some(_) => {
-                let _split: Vec<&str> = _auth.unwrap().to_str().unwrap().split("Bearer").collect();
-                let token = _split[1].trim();
-                match decode_token(&token) {
-                    Ok(msg) => ok(Credentials::new(&token, msg.claims)),
-                    Err(_e) => err(ErrorUnauthorized("invalid token")),
-                }
+    fn from_request(req: &HttpRequest, _: &mut dev::Payload) -> Self::Future {
+        if let Some(h) = req.headers().get("Authorization") {
+            let token = h.to_str().unwrap().trim_start_matches("Bearer").trim();
+            match decode_token(&token) {
+                Ok(msg) => ok(Credentials::new(&token, msg.claims)),
+                Err(_e) => err(ErrorUnauthorized("invalid token")),
             }
-            None => err(ErrorUnauthorized("blocked!")),
+        } else {
+            err(ErrorUnauthorized("blocked!"))
         }
     }
 }
@@ -190,7 +187,7 @@ async fn get_account_transactions(
     Ok((acc, data.results))
 }
 
-type UserCache = HashMap<String, Vec<Transaction>>; // accounts -> transactions
+type UserCache = HashMap<String, Vec<Transaction>>; // account -> transactions
 type AppCache = HashMap<String, UserCache>; // subject -> usercache
 
 async fn get_transactions(cfg: &Config, creds: &Credentials) -> anyhow::Result<UserCache> {
